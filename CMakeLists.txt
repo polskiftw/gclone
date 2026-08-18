@@ -13,14 +13,24 @@ add_executable(gclone WIN32
     src/main.cpp
     src/backend_process.cpp
     src/media_utils.cpp
+    src/provisioner.cpp
 )
 
 target_include_directories(gclone PRIVATE src)
-target_compile_definitions(gclone PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(gclone PRIVATE
+    UNICODE
+    _UNICODE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    _WIN32_WINNT=0x0A00
+)
 
 if(MSVC)
     target_compile_options(gclone PRIVATE /W4 /permissive- /utf-8)
     set_property(TARGET gclone PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_options(gclone PRIVATE
+        "/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+    )
 endif()
 
 target_link_libraries(gclone PRIVATE
