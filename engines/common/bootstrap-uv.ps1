@@ -8,11 +8,13 @@ function Initialize-GCloneUv {
     New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
 
     if (-not (Test-Path $uvExe)) {
-        Write-Output "GCLONE:Installing gclone's local runtime manager..."
+        # Do not emit status/vendor installer chatter into the success-output pipeline: callers
+        # assign this function's single return value to $uv and need that value to be only uv.exe.
+        Write-Host "GCLONE:Installing gclone's local runtime manager..."
         $env:UV_UNMANAGED_INSTALL = $toolDir
         $env:UV_NO_MODIFY_PATH = "1"
         $installer = Invoke-RestMethod "https://astral.sh/uv/install.ps1"
-        Invoke-Expression $installer
+        Invoke-Expression $installer | Out-Host
     }
 
     if (-not (Test-Path $uvExe)) {
