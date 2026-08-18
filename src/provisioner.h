@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -24,5 +25,6 @@ State GetState(EngineId engine);
 bool RunSetup(EngineId engine,
               const std::filesystem::path& executableDirectory,
               const std::function<void(const std::wstring&)>& onLine,
+              const std::atomic<bool>* cancel,
               std::wstring& error);
 }  // namespace provision
