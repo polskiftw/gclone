@@ -1,8 +1,7 @@
 @echo off
 setlocal
-cd /d "%~dp0"
-if exist ".venv\Scripts\python.exe" (
-    ".venv\Scripts\python.exe" worker.py
-) else (
-    py -3.12 worker.py
-)
+set "RUNTIME=%LOCALAPPDATA%\gclone\runtimes\qwen"
+set "HF_HOME=%RUNTIME%\hf"
+if not exist "%RUNTIME%\.venv\Scripts\python.exe" exit /b 86
+cd /d "%RUNTIME%"
+"%RUNTIME%\.venv\Scripts\python.exe" "%~dp0worker.py"
