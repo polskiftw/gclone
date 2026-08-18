@@ -33,7 +33,11 @@ BackendProcess::~BackendProcess() {
 bool BackendProcess::Start(const std::wstring& launcherPath, std::wstring& error) {
     std::scoped_lock lock(ioMutex_);
     if (process_) {
-        return true;
+        DWORD exitCode = 0;
+        if (GetExitCodeProcess(process_, &exitCode) && exitCode == STILL_ACTIVE) {
+            return true;
+        }
+        CloseHandles();
     }
     if (!std::filesystem::exists(launcherPath)) {
         error = L"Backend launcher not found: " + launcherPath;
@@ -156,9 +160,6 @@ bool BackendProcess::ReadLine(std::string& line, std::wstring& error) {
 void BackendProcess::Stop() {
     HANDLE processSnapshot = process_;
     if (processSnapshot) {
-        // A model call can block the request thread for a long time. Terminating the isolated
-        // worker is the reliable cancellation/unload boundary and releases GPU memory cleanly
-        // from the frontend's point of view.
         TerminateProcess(processSnapshot, 0);
         WaitForSingleObject(processSnapshot, 1500);
     }
