@@ -1,0 +1,16 @@
+/build/
+/.vs/
+/.vscode/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Engine runtimes and model weights are installed locally, never committed.
+engines/qwen/.venv/
+engines/index/runtime/
+engines/index/.venv/
+models/
+cache/
+__pycache__/
+*.pyc
