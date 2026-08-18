@@ -18,6 +18,20 @@ jobs:
         run: |
           python -m py_compile engines/qwen/worker.py
           python -m py_compile engines/index/worker.py
+      - name: Check provisioning script syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem engines -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Error ("PowerShell parse errors in " + $_.FullName + ": " + ($errors -join "; "))
+            }
+          }
+          if ($failed) { exit 1 }
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
