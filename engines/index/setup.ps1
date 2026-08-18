@@ -19,10 +19,10 @@ if (-not (Test-Path runtime\.git)) {
 Write-Host "Creating the isolated IndexTTS 2.5 environment using the upstream uv workflow..."
 uv sync --project runtime
 
-if (-not (Test-Path runtime\checkpoints\config.yaml)) {
-    Write-Host "Downloading official IndexTTS 2.5 model files..."
-    uvx --from "huggingface-hub[cli,hf_xet]" hf download IndexTeam/IndexTTS-2.5 --local-dir runtime/checkpoints
-}
+Write-Host "Reconciling official IndexTTS 2.5 model files..."
+# Always target the official 2.5 snapshot. huggingface-hub reuses its cache, so already-current
+# files are not needlessly downloaded, and an old pre-2.5 gclone checkpoint directory is upgraded.
+uvx --from "huggingface-hub[cli,hf_xet]" hf download IndexTeam/IndexTTS-2.5 --local-dir runtime/checkpoints
 
 Write-Host ""
 Write-Host "IndexTTS 2.5 runtime is ready."
