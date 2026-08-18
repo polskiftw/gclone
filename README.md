@@ -2,7 +2,7 @@
 
 `gclone` is a small native Windows frontend for local voice-cloning / text-to-speech engines. It keeps the desktop UI independent from each Python/CUDA stack, so model families can use isolated environments instead of fighting over one shared PyTorch install.
 
-This repository is at the first vertical-slice stage. The native shell, dynamic capability-driven controls, Qwen3-TTS voice-clone adapter, current runnable IndexTTS2 adapter, temporary session cache, WAV playback, WAV export, and Windows-native MP3 export are implemented.
+This repository is at the first vertical-slice stage. The native shell, dynamic capability-driven controls, Qwen3-TTS voice-clone adapter, IndexTTS-2.5 adapter, temporary session cache, WAV playback, WAV export, and Windows-native MP3 export are implemented.
 
 ## Current backend status
 
@@ -12,11 +12,11 @@ This is the primary first working backend. `gclone` uses the official `Qwen3TTSM
 
 The model is loaded lazily only when Generate is clicked. A clone prompt is cached inside the worker and reused when the same reference sample/settings are used again.
 
-### IndexTTS
+### IndexTTS-2.5
 
-The public runnable upstream currently provides IndexTTS2. The IndexTTS 2.5 technical report and official samples exist, but there is not yet an official runnable 2.5 release to integrate. `gclone` therefore labels and invokes the current runnable IndexTTS2 rather than pretending it is 2.5.
+The Index backend now uses the official runnable **IndexTTS-2.5** release and official `IndexTeam/IndexTTS-2.5` checkpoints. The adapter calls `indextts.infer_v2_5.IndexTTS2` directly; it does not use the upstream Gradio UI.
 
-The Index adapter is deliberately isolated so a future official 2.5 runtime can replace it without redesigning the frontend.
+For IndexTTS-2.5 the native UI exposes only applicable controls: its five supported languages, text-driven emotion + strength, native `duration_factor` speed control, and supported advanced generation parameters. Speaker conditioning is cached by upstream when the same reference clip is reused. The optional QwenEmotion component is loaded only when an emotion description is actually supplied.
 
 ## UI behavior
 
@@ -64,7 +64,7 @@ The script installs the official `qwen-tts` package. Model weights are downloade
 
 `gclone` uses PyTorch SDPA by default instead of making FlashAttention a hard Windows installation dependency.
 
-## Set up IndexTTS2 (optional)
+## Set up IndexTTS-2.5 (optional)
 
 Index uses its own upstream-supported `uv` environment and a different Python compatibility range:
 
@@ -72,7 +72,7 @@ Index uses its own upstream-supported `uv` environment and a different Python co
 powershell -ExecutionPolicy Bypass -File .\build\Release\engines\index\setup.ps1
 ```
 
-The script clones the official IndexTTS repository into the ignored local runtime directory, runs the upstream `uv sync` workflow, and downloads the official IndexTTS2 checkpoints. The upstream source/model files are **not** vendored into this repository.
+The script clones/updates the official IndexTTS repository into the ignored local runtime directory, runs its `uv` environment workflow, and downloads the official `IndexTeam/IndexTTS-2.5` checkpoints. The upstream source/model files are **not** vendored into this repository.
 
 ## Export
 
