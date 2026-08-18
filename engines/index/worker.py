@@ -1,6 +1,6 @@
 """Isolated IndexTTS-2.5 worker for gclone.
 
-The official IndexTTS repository is installed into engines/index/runtime by setup.ps1.
+The official IndexTTS source/runtime is provisioned by gclone under Local AppData.
 Stdout is reserved for gclone's newline-delimited JSON protocol; upstream output goes to stderr.
 """
 
@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent
-RUNTIME = ROOT / "runtime"
-CHECKPOINTS = RUNTIME / "checkpoints"
+ENGINE_ROOT = Path(os.environ.get("GCLONE_INDEX_ROOT", str(ROOT / "runtime")))
+RUNTIME = ENGINE_ROOT / "source"
+CHECKPOINTS = ENGINE_ROOT / "checkpoints"
 _model = None
 _model_has_qwen_emo = False
 
@@ -72,16 +74,14 @@ def ensure_model(*, require_qwen_emo: bool = False):
     if _model is not None and (not require_qwen_emo or _model_has_qwen_emo):
         return _model
 
-    # Text-driven emotion guidance requires QwenEmotion to be present at construction time.
-    # Do not pay that VRAM/startup cost unless the user actually supplied an emotion description.
     if _model is not None:
         emit("status", message="Reloading IndexTTS 2.5 with text-emotion guidance…")
         _release_model()
 
-    if not RUNTIME.is_dir():
-        raise RuntimeError("IndexTTS 2.5 is not installed. Run engines\\index\\setup.ps1 first.")
+    if not RUNTIME.is_dir() or not (RUNTIME / "indextts" / "infer_v2_5.py").is_file():
+        raise RuntimeError("The IndexTTS 2.5 runtime is unavailable. Use gclone's automatic Install/Repair flow.")
     if not (CHECKPOINTS / "config.yaml").is_file():
-        raise RuntimeError("IndexTTS 2.5 model files are missing. Re-run engines\\index\\setup.ps1.")
+        raise RuntimeError("The IndexTTS 2.5 model files are unavailable. Use gclone's automatic Install/Repair flow.")
 
     emit("status", message="Loading IndexTTS 2.5 in BF16…")
     try:
@@ -104,8 +104,8 @@ def ensure_model(*, require_qwen_emo: bool = False):
     except Exception as exc:
         _release_model()
         raise RuntimeError(
-            "IndexTTS 2.5 could not load. Run engines\\index\\setup.ps1 and make sure CUDA 12.8+ "
-            "and the NVIDIA driver are available. Details: " + str(exc)
+            "IndexTTS 2.5 could not load. gclone can repair the engine files, but the NVIDIA driver "
+            "and CUDA-compatible GPU stack must also be available. Details: " + str(exc)
         ) from exc
     return _model
 
@@ -144,8 +144,6 @@ def generate(request: dict[str, Any]) -> None:
 
     emit("status", message="Preparing reference voice…")
     emit("status", message="Generating speech…")
-    # IndexTTS performs reference audio loading/cutting/resampling inside infer(). The selected
-    # source file is therefore still untouched until this Generate request reaches the worker.
     with contextlib.redirect_stdout(sys.stderr):
         model.infer(
             spk_audio_prompt=reference_audio,
