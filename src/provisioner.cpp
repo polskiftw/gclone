@@ -100,7 +100,7 @@ fs::path EngineRoot(EngineId engine) {
 State GetState(EngineId engine) {
     const fs::path root = EngineRoot(engine);
     if (engine == EngineId::Qwen) {
-        const bool ready = Exists(root / L".ready-qwen-1.7b-v1") &&
+        const bool ready = Exists(root / L".ready-qwen-1.7b-v2") &&
                            Exists(root / L".venv" / L"Scripts" / L"python.exe");
         if (ready) return State::Ready;
     } else {
@@ -140,6 +140,26 @@ bool RunSetup(EngineId engine,
     HANDLE nulInput = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                   &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (!job) {
+        error = LastErrorMessage(L"Could not create installer process group");
+        CloseHandle(readPipe);
+        CloseHandle(writePipe);
+        if (nulInput != INVALID_HANDLE_VALUE) CloseHandle(nulInput);
+        return false;
+    }
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo{};
+    jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jobInfo, sizeof(jobInfo))) {
+        error = LastErrorMessage(L"Could not configure installer process group");
+        CloseHandle(job);
+        CloseHandle(readPipe);
+        CloseHandle(writePipe);
+        if (nulInput != INVALID_HANDLE_VALUE) CloseHandle(nulInput);
+        return false;
+    }
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -155,13 +175,37 @@ bool RunSetup(EngineId engine,
     const std::wstring workingDirectory = script.parent_path().wstring();
 
     const BOOL started = CreateProcessW(nullptr, commandBuffer.data(), nullptr, nullptr, TRUE,
-                                        CREATE_NO_WINDOW, nullptr, workingDirectory.c_str(), &si, &pi);
+                                        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
+                                        workingDirectory.c_str(), &si, &pi);
 
     CloseHandle(writePipe);
     if (nulInput != INVALID_HANDLE_VALUE) CloseHandle(nulInput);
 
     if (!started) {
         error = LastErrorMessage(L"Could not start the built-in installer");
+        CloseHandle(job);
+        CloseHandle(readPipe);
+        return false;
+    }
+
+    if (!AssignProcessToJobObject(job, pi.hProcess)) {
+        error = LastErrorMessage(L"Could not attach the installer to its process group");
+        TerminateProcess(pi.hProcess, ERROR_CANCELLED);
+        WaitForSingleObject(pi.hProcess, 1500);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(job);
+        CloseHandle(readPipe);
+        return false;
+    }
+
+    if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        error = LastErrorMessage(L"Could not resume the built-in installer");
+        TerminateJobObject(job, ERROR_CANCELLED);
+        WaitForSingleObject(pi.hProcess, 1500);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(job);
         CloseHandle(readPipe);
         return false;
     }
@@ -172,9 +216,9 @@ bool RunSetup(EngineId engine,
     bool cancelled = false;
 
     for (;;) {
-        if (cancel && cancel->load()) {
+        if (!cancelled && cancel && cancel->load()) {
             cancelled = true;
-            TerminateProcess(pi.hProcess, ERROR_CANCELLED);
+            TerminateJobObject(job, ERROR_CANCELLED);
         }
 
         DWORD available = 0;
@@ -215,6 +259,10 @@ bool RunSetup(EngineId engine,
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+
+    // KILL_ON_JOB_CLOSE is intentional: if a child somehow outlived PowerShell, do not leave
+    // a hidden uv/python/model download process running after gclone considers setup finished.
+    CloseHandle(job);
 
     if (cancelled) {
         error = L"Installation cancelled.";
