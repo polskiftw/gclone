@@ -1,0 +1,27 @@
+name: windows-build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Check worker syntax
+        shell: pwsh
+        run: |
+          python -m py_compile engines/qwen/worker.py
+          python -m py_compile engines/index/worker.py
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: gclone-windows-x64
+          path: |
+            build/Release/gclone.exe
+            build/Release/engines/**
