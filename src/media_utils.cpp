@@ -101,13 +101,8 @@ bool ExportMp3(const std::wstring& sourceWav, const std::wstring& destinationMp3
 
     bool success = false;
     do {
-        ComPtr<IMFAttributes> attributes;
-        hr = MFCreateAttributes(&attributes, 1);
-        if (FAILED(hr)) { error = HrMessage(L"Could not create decoder attributes", hr); break; }
-        attributes->SetUINT32(MF_SOURCE_READER_ENABLE_AUDIO_PROCESSING, TRUE);
-
         ComPtr<IMFSourceReader> reader;
-        hr = MFCreateSourceReaderFromURL(sourceWav.c_str(), attributes.Get(), &reader);
+        hr = MFCreateSourceReaderFromURL(sourceWav.c_str(), nullptr, &reader);
         if (FAILED(hr)) { error = HrMessage(L"Could not open generated WAV", hr); break; }
 
         ComPtr<IMFMediaType> requestedPcm;
@@ -115,11 +110,11 @@ bool ExportMp3(const std::wstring& sourceWav, const std::wstring& destinationMp3
         if (FAILED(hr)) { error = HrMessage(L"Could not create PCM media type", hr); break; }
         requestedPcm->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         requestedPcm->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-        hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, requestedPcm.Get());
+        hr = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, requestedPcm.Get());
         if (FAILED(hr)) { error = HrMessage(L"Could not decode WAV as PCM", hr); break; }
 
         ComPtr<IMFMediaType> inputType;
-        hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &inputType);
+        hr = reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &inputType);
         if (FAILED(hr)) { error = HrMessage(L"Could not inspect decoded audio", hr); break; }
 
         UINT32 channels = 0;
@@ -154,7 +149,7 @@ bool ExportMp3(const std::wstring& sourceWav, const std::wstring& destinationMp3
         for (;;) {
             DWORD flags = 0;
             ComPtr<IMFSample> sample;
-            hr = reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &sample);
+            hr = reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), 0, nullptr, &flags, nullptr, &sample);
             if (FAILED(hr)) { error = HrMessage(L"Could not decode generated WAV", hr); break; }
             if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
                 hr = S_OK;
