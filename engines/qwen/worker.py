@@ -63,8 +63,8 @@ def ensure_model():
             )
     except Exception as exc:
         raise RuntimeError(
-            "Qwen3-TTS could not load. Run engines\\qwen\\setup.ps1, then make sure the NVIDIA GPU "
-            "and CUDA-enabled PyTorch environment are available. Details: " + str(exc)
+            "Qwen3-TTS could not load. gclone can repair the local engine files automatically, but the NVIDIA "
+            "driver and CUDA-compatible GPU stack must also be available. Details: " + str(exc)
         ) from exc
     return _model
 
@@ -101,8 +101,6 @@ def generate(request: dict[str, Any]) -> None:
     model = ensure_model()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # IMPORTANT: the source file is first decoded/touched here, after Generate was clicked.
-    # Qwen's official prompt builder performs its required decode/resample and keeps the source read-only.
     prompt_key = (os.path.abspath(reference_audio), reference_transcript, x_vector_only)
     if _prompt_cache_key != prompt_key or _prompt_cache is None:
         emit("status", message="Preparing reference voice…")
