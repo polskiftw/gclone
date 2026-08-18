@@ -1,8 +1,7 @@
-"""Isolated IndexTTS worker for gclone.
+"""Isolated IndexTTS-2.5 worker for gclone.
 
-The currently runnable official release is IndexTTS2. IndexTTS 2.5 has a technical report and
-samples, but no official runnable release as of the repository review captured by this project.
-This adapter is intentionally isolated so the 2.5 runtime can replace it without changing the UI.
+The official IndexTTS repository is installed into engines/index/runtime by setup.ps1.
+Stdout is reserved for gclone's newline-delimited JSON protocol; upstream output goes to stderr.
 """
 
 from __future__ import annotations
@@ -18,6 +17,15 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / "runtime"
 CHECKPOINTS = RUNTIME / "checkpoints"
 _model = None
+_model_has_qwen_emo = False
+
+LANGUAGES = {
+    "English": "EN",
+    "Chinese": "ZH",
+    "Japanese": "JA",
+    "Spanish": "ES",
+    "Arabic": "AR",
+}
 
 
 def emit(event: str, *, terminal: bool = False, **payload: Any) -> None:
@@ -28,12 +36,14 @@ def emit(event: str, *, terminal: bool = False, **payload: Any) -> None:
 def capabilities() -> dict[str, Any]:
     return {
         "engine": "index",
-        "display_name": "IndexTTS 2 (current runnable release)",
-        "language": False,
+        "display_name": "IndexTTS 2.5",
+        "language": True,
+        "language_options": "|".join(LANGUAGES),
         "reference_transcript": False,
         "x_vector_only": False,
         "emotion_text": True,
         "emotion_strength": True,
+        "duration_factor": True,
         "temperature": True,
         "top_p": True,
         "top_k": True,
@@ -41,87 +51,122 @@ def capabilities() -> dict[str, Any]:
     }
 
 
-def ensure_model():
-    global _model
-    if _model is not None:
-        return _model
-    if not RUNTIME.is_dir():
-        raise RuntimeError("IndexTTS is not installed. Run engines\\index\\setup.ps1 first.")
-    if not (CHECKPOINTS / "config.yaml").is_file():
-        raise RuntimeError("IndexTTS model files are missing. Re-run engines\\index\\setup.ps1.")
+def _release_model() -> None:
+    global _model, _model_has_qwen_emo
+    _model = None
+    _model_has_qwen_emo = False
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            import gc
+            import torch
 
-    emit("status", message="Loading IndexTTS 2 in FP16…")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def ensure_model(*, require_qwen_emo: bool = False):
+    global _model, _model_has_qwen_emo
+    if _model is not None and (not require_qwen_emo or _model_has_qwen_emo):
+        return _model
+
+    # Text-driven emotion guidance requires QwenEmotion to be present at construction time.
+    # Do not pay that VRAM/startup cost unless the user actually supplied an emotion description.
+    if _model is not None:
+        emit("status", message="Reloading IndexTTS 2.5 with text-emotion guidance…")
+        _release_model()
+
+    if not RUNTIME.is_dir():
+        raise RuntimeError("IndexTTS 2.5 is not installed. Run engines\\index\\setup.ps1 first.")
+    if not (CHECKPOINTS / "config.yaml").is_file():
+        raise RuntimeError("IndexTTS 2.5 model files are missing. Re-run engines\\index\\setup.ps1.")
+
+    emit("status", message="Loading IndexTTS 2.5 in BF16…")
     try:
         sys.path.insert(0, str(RUNTIME))
         with contextlib.redirect_stdout(sys.stderr):
-            from indextts.infer_v2 import IndexTTS2
+            from indextts.infer_v2_5 import IndexTTS2
 
             _model = IndexTTS2(
                 cfg_path=str(CHECKPOINTS / "config.yaml"),
                 model_dir=str(CHECKPOINTS),
-                use_fp16=True,
+                use_bf16=True,
                 device="cuda:0",
                 use_cuda_kernel=False,
                 use_deepspeed=False,
+                use_accel=False,
+                use_torch_compile=False,
+                use_qwen_emo=require_qwen_emo,
             )
+            _model_has_qwen_emo = require_qwen_emo
     except Exception as exc:
-        raise RuntimeError("IndexTTS could not load: " + str(exc)) from exc
+        _release_model()
+        raise RuntimeError(
+            "IndexTTS 2.5 could not load. Run engines\\index\\setup.ps1 and make sure CUDA 12.8+ "
+            "and the NVIDIA driver are available. Details: " + str(exc)
+        ) from exc
     return _model
+
+
+def numeric_kwargs(request: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in ("temperature", "top_p", "repetition_penalty"):
+        if key in request:
+            out[key] = float(request[key])
+    if "top_k" in request:
+        out["top_k"] = int(float(request["top_k"]))
+    return out
 
 
 def generate(request: dict[str, Any]) -> None:
     reference_audio = str(request.get("reference_audio", "")).strip()
     target_text = str(request.get("text", "")).strip()
+    language_name = str(request.get("language") or "English")
     emotion_text = str(request.get("emotion_text", "")).strip()
     emotion_strength = max(0.0, min(1.0, float(request.get("emotion_strength", 0.6))))
-    output_path = Path(str(request.get("output_path", "")))
+    duration_factor = max(0.5, min(2.0, float(request.get("duration_factor", 1.0))))
+    output_path_text = str(request.get("output_path", "")).strip()
+    output_path = Path(output_path_text) if output_path_text else None
 
     if not reference_audio or not Path(reference_audio).is_file():
         raise ValueError("The selected reference audio file does not exist.")
     if not target_text:
         raise ValueError("The text to speak is empty.")
+    if output_path is None:
+        raise ValueError("No temporary output path was provided.")
+    if language_name not in LANGUAGES:
+        raise ValueError(f"Unsupported IndexTTS 2.5 language: {language_name}")
 
-    model = ensure_model()
+    model = ensure_model(require_qwen_emo=bool(emotion_text))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    kwargs: dict[str, Any] = {}
-    if "temperature" in request: kwargs["temperature"] = float(request["temperature"])
-    if "top_p" in request: kwargs["top_p"] = float(request["top_p"])
-    if "top_k" in request: kwargs["top_k"] = int(float(request["top_k"]))
-    if "repetition_penalty" in request: kwargs["repetition_penalty"] = float(request["repetition_penalty"])
 
     emit("status", message="Preparing reference voice…")
     emit("status", message="Generating speech…")
-    # IndexTTS performs its audio load/cut/resample inside infer(), so the source remains untouched
-    # until this Generate request reaches the worker.
+    # IndexTTS performs reference audio loading/cutting/resampling inside infer(). The selected
+    # source file is therefore still untouched until this Generate request reaches the worker.
     with contextlib.redirect_stdout(sys.stderr):
         model.infer(
             spk_audio_prompt=reference_audio,
             text=target_text,
+            lang=LANGUAGES[language_name],
             output_path=str(output_path),
             use_emo_text=bool(emotion_text),
             emo_text=emotion_text or None,
             emo_alpha=emotion_strength,
+            duration_factor=duration_factor,
             verbose=False,
-            **kwargs,
+            **numeric_kwargs(request),
         )
 
     if not output_path.is_file():
-        raise RuntimeError("IndexTTS returned without creating an output WAV.")
+        raise RuntimeError("IndexTTS 2.5 returned without creating an output WAV.")
     emit("result", terminal=True, output_path=str(output_path))
 
 
 def unload() -> None:
-    global _model
-    _model = None
-    try:
-        with contextlib.redirect_stdout(sys.stderr):
-            import gc
-            import torch
-            gc.collect()
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
-    except Exception:
-        pass
+    _release_model()
 
 
 def handle(request: dict[str, Any]) -> bool:
@@ -131,9 +176,12 @@ def handle(request: dict[str, Any]) -> bool:
     elif command == "generate":
         generate(request)
     elif command == "unload":
-        unload(); emit("unloaded", terminal=True)
+        unload()
+        emit("unloaded", terminal=True)
     elif command == "shutdown":
-        unload(); emit("shutdown", terminal=True); return False
+        unload()
+        emit("shutdown", terminal=True)
+        return False
     else:
         emit("error", terminal=True, message=f"Unknown backend command: {command!r}")
     return True
@@ -142,9 +190,11 @@ def handle(request: dict[str, Any]) -> bool:
 def main() -> int:
     for raw in sys.stdin:
         raw = raw.strip()
-        if not raw: continue
+        if not raw:
+            continue
         try:
-            if not handle(json.loads(raw)): break
+            if not handle(json.loads(raw)):
+                break
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             emit("error", terminal=True, message=str(exc))
