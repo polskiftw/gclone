@@ -6,9 +6,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iterator>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -16,6 +16,7 @@
 #include "backend_process.h"
 #include "json_lite.h"
 #include "media_utils.h"
+#include "provisioner.h"
 
 namespace fs = std::filesystem;
 
@@ -23,7 +24,9 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"gclone.main";
 constexpr UINT WM_APP_BACKEND_LINE = WM_APP + 1;
 constexpr UINT WM_APP_BACKEND_ERROR = WM_APP + 2;
-constexpr UINT WM_APP_SELECT_MODEL = WM_APP + 3;
+constexpr UINT WM_APP_INSTALL_LINE = WM_APP + 3;
+constexpr UINT WM_APP_INSTALL_DONE = WM_APP + 4;
+constexpr UINT WM_APP_INSTALL_ERROR = WM_APP + 5;
 
 constexpr int IDC_VOICE = 100;
 constexpr int IDC_BROWSE = 101;
@@ -55,20 +58,24 @@ constexpr int IDC_TOPK = 137;
 constexpr int IDC_REP_LABEL = 138;
 constexpr int IDC_REP = 139;
 constexpr int IDC_STATUS = 140;
+constexpr int IDC_INSTALL_PROGRESS = 141;
+constexpr int ID_PROVISION_ACTION = 1001;
 
 std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return {};
     const int count = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    std::wstring out(count, L'\0');
+    std::wstring out(static_cast<size_t>(count), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), count);
     return out;
 }
 
 std::string WideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(count, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), count, nullptr, nullptr);
+    const int count = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0,
+                                          nullptr, nullptr);
+    std::string out(static_cast<size_t>(count), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), count,
+                        nullptr, nullptr);
     return out;
 }
 
@@ -76,7 +83,7 @@ std::wstring GetText(HWND control) {
     const int len = GetWindowTextLengthW(control);
     std::wstring out(static_cast<size_t>(len) + 1, L'\0');
     GetWindowTextW(control, out.data(), len + 1);
-    out.resize(len);
+    out.resize(static_cast<size_t>(len));
     return out;
 }
 
@@ -85,7 +92,7 @@ void SetFont(HWND control, HFONT font) {
 }
 
 void Show(HWND control, bool visible) {
-    ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
+    if (control) ShowWindow(control, visible ? SW_SHOW : SW_HIDE);
 }
 
 std::wstring FormatTime(long ms) {
@@ -127,6 +134,14 @@ void CleanupOldSessions(const fs::path& cacheRoot) {
     }
 }
 
+bool TryReadNumber(HWND edit, double& value) {
+    const std::wstring text = GetText(edit);
+    if (text.empty()) return false;
+    wchar_t* end = nullptr;
+    value = wcstod(text.c_str(), &end);
+    return end != text.c_str() && *end == L'\0' && std::isfinite(value);
+}
+
 struct Capabilities {
     bool language = false;
     bool referenceTranscript = false;
@@ -146,7 +161,7 @@ public:
     ~GCloneApp() { Shutdown(); }
 
     bool Create(int showCommand) {
-        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS};
         InitCommonControlsEx(&controls);
 
         WNDCLASSEXW wc{};
@@ -159,9 +174,10 @@ public:
         wc.lpszClassName = kWindowClass;
         if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
-        window_ = CreateWindowExW(0, kWindowClass, L"gclone", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
-                                      WS_MINIMIZEBOX,
-                                  CW_USEDEFAULT, CW_USEDEFAULT, 760, 900, nullptr, nullptr, instance_, this);
+        window_ = CreateWindowExW(0, kWindowClass, L"gclone",
+                                  WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 760, 930,
+                                  nullptr, nullptr, instance_, this);
         if (!window_) return false;
         ShowWindow(window_, showCommand);
         UpdateWindow(window_);
@@ -188,7 +204,8 @@ private:
         } else {
             self = reinterpret_cast<GCloneApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         }
-        return self ? self->WndProc(message, wParam, lParam) : DefWindowProcW(hwnd, message, wParam, lParam);
+        return self ? self->WndProc(message, wParam, lParam)
+                    : DefWindowProcW(hwnd, message, wParam, lParam);
     }
 
     LRESULT WndProc(UINT message, WPARAM wParam, LPARAM lParam) {
@@ -210,7 +227,19 @@ private:
                 MessageBoxW(window_, error->c_str(), L"gclone backend", MB_OK | MB_ICONERROR);
                 return 0;
             }
-            case WM_APP_SELECT_MODEL: SelectModel(); return 0;
+            case WM_APP_INSTALL_LINE: {
+                std::unique_ptr<std::wstring> line(reinterpret_cast<std::wstring*>(lParam));
+                SetStatus(*line);
+                return 0;
+            }
+            case WM_APP_INSTALL_DONE:
+                OnInstallDone();
+                return 0;
+            case WM_APP_INSTALL_ERROR: {
+                std::unique_ptr<std::wstring> error(reinterpret_cast<std::wstring*>(lParam));
+                OnInstallError(*error);
+                return 0;
+            }
             case WM_CLOSE:
                 DestroyWindow(window_);
                 return 0;
@@ -218,28 +247,34 @@ private:
                 Shutdown();
                 PostQuitMessage(0);
                 return 0;
-            default: return DefWindowProcW(window_, message, wParam, lParam);
+            default:
+                return DefWindowProcW(window_, message, wParam, lParam);
         }
     }
 
     HWND MakeStatic(const wchar_t* text, int x, int y, int w, int h, int id = 0) {
         HWND control = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE,
-                                       x, y, w, h, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+                                       x, y, w, h, window_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         SetFont(control, font_);
         return control;
     }
 
     HWND MakeEdit(int id, int x, int y, int w, int h, DWORD extraStyle = 0) {
-        HWND control = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-                                       ES_AUTOHSCROLL | extraStyle,
-                                       x, y, w, h, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+        HWND control = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extraStyle,
+                                       x, y, w, h, window_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         SetFont(control, font_);
         return control;
     }
 
-    HWND MakeButton(const wchar_t* text, int id, int x, int y, int w, int h, DWORD style = BS_PUSHBUTTON) {
-        HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
-                                       x, y, w, h, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+    HWND MakeButton(const wchar_t* text, int id, int x, int y, int w, int h,
+                    DWORD style = BS_PUSHBUTTON) {
+        HWND control = CreateWindowExW(0, L"BUTTON", text,
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+                                       x, y, w, h, window_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         SetFont(control, font_);
         return control;
     }
@@ -253,29 +288,42 @@ private:
         browse_ = MakeButton(L"…", IDC_BROWSE, 672, 43, 48, 30);
 
         MakeStatic(L"Text", 24, 88, 100, 22);
-        text_ = MakeEdit(IDC_TEXT, 24, 112, 696, 190, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN);
+        text_ = MakeEdit(IDC_TEXT, 24, 112, 696, 190,
+                         ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_WANTRETURN);
 
         MakeStatic(L"Model", 24, 318, 100, 22);
-        model_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                 24, 342, 696, 200, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL)), instance_, nullptr);
+        model_ = CreateWindowExW(0, WC_COMBOBOXW, L"",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                 24, 342, 696, 200, window_,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL)), instance_, nullptr);
         SetFont(model_, font_);
-        SendMessageW(model_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Qwen3-TTS 12Hz 1.7B Base — Voice Clone"));
-        SendMessageW(model_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"IndexTTS 2.5 — Voice Clone"));
+        SendMessageW(model_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"Qwen3-TTS 12Hz 1.7B Base — Voice Clone"));
+        SendMessageW(model_, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"IndexTTS 2.5 — Voice Clone"));
         SendMessageW(model_, CB_SETCURSEL, 0, 0);
 
         languageLabel_ = MakeStatic(L"Language", 24, 382, 110, 22, IDC_LANGUAGE_LABEL);
-        language_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                    140, 378, 220, 200, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LANGUAGE)), instance_, nullptr);
+        language_ = CreateWindowExW(0, WC_COMBOBOXW, L"",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                    140, 378, 220, 200, window_,
+                                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LANGUAGE)), instance_, nullptr);
         SetFont(language_, font_);
 
         transcriptLabel_ = MakeStatic(L"Reference transcript", 24, 418, 150, 22, IDC_TRANSCRIPT_LABEL);
-        transcript_ = MakeEdit(IDC_TRANSCRIPT, 180, 414, 540, 54, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
+        transcript_ = MakeEdit(IDC_TRANSCRIPT, 180, 414, 540, 54,
+                               ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
 
         emotionLabel_ = MakeStatic(L"Emotion description", 24, 382, 150, 22, IDC_EMOTION_LABEL);
-        emotion_ = MakeEdit(IDC_EMOTION, 180, 378, 540, 54, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
-        emotionStrengthLabel_ = MakeStatic(L"Emotion strength", 24, 442, 150, 22, IDC_EMOTION_STRENGTH_LABEL);
-        emotionStrength_ = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
-                                           180, 438, 300, 32, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EMOTION_STRENGTH)), instance_, nullptr);
+        emotion_ = MakeEdit(IDC_EMOTION, 180, 378, 540, 54,
+                            ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
+        emotionStrengthLabel_ = MakeStatic(L"Emotion strength", 24, 442, 150, 22,
+                                           IDC_EMOTION_STRENGTH_LABEL);
+        emotionStrength_ = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
+                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
+                                           180, 438, 300, 32, window_,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EMOTION_STRENGTH)),
+                                           instance_, nullptr);
         SendMessageW(emotionStrength_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
         SendMessageW(emotionStrength_, TBM_SETPOS, TRUE, 60);
 
@@ -287,8 +335,10 @@ private:
         generate_ = MakeButton(L"Generate", IDC_GENERATE, 292, 522, 170, 38, BS_DEFPUSHBUTTON);
 
         play_ = MakeButton(L"▶", IDC_PLAY, 24, 584, 50, 32);
-        seek_ = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
-                                84, 584, 520, 32, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEEK)), instance_, nullptr);
+        seek_ = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
+                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
+                                84, 584, 520, 32, window_,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEEK)), instance_, nullptr);
         SendMessageW(seek_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 1000));
         time_ = MakeStatic(L"0:00 / 0:00", 614, 590, 105, 22, IDC_TIME);
         export_ = MakeButton(L"Export…", IDC_EXPORT, 24, 634, 120, 32);
@@ -306,8 +356,12 @@ private:
         rep_ = MakeEdit(IDC_REP, 612, 750, 70, 26);
 
         status_ = MakeStatic(L"Status: Starting…", 24, 816, 696, 24, IDC_STATUS);
+        installProgress_ = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_MARQUEE,
+                                           24, 846, 696, 12, window_,
+                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_INSTALL_PROGRESS)),
+                                           instance_, nullptr);
+        Show(installProgress_, false);
 
-        EnableWindow(generate_, FALSE);
         EnableWindow(play_, FALSE);
         EnableWindow(export_, FALSE);
         HideDynamicControls();
@@ -320,7 +374,7 @@ private:
         fs::create_directories(sessionDir_, ec);
 
         SetTimer(window_, 1, 200, nullptr);
-        PostMessageW(window_, WM_APP_SELECT_MODEL, 0, 0);
+        SelectModel();
     }
 
     void OnCommand(int id, int notification) {
@@ -365,6 +419,10 @@ private:
     }
 
     void OnDrop(HDROP drop) {
+        if (provisioning_) {
+            DragFinish(drop);
+            return;
+        }
         wchar_t path[32768]{};
         if (DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path)))) {
             SetWindowTextW(voice_, path);
@@ -386,63 +444,133 @@ private:
         if (GetOpenFileNameW(&ofn)) SetWindowTextW(voice_, path);
     }
 
+    provision::EngineId SelectedEngine() const {
+        return selectedModel_ == 0 ? provision::EngineId::Qwen : provision::EngineId::Index;
+    }
+
     void SelectModel() {
         if (busy_) return;
         StopPlayback();
         backend_.Stop();
         JoinTask();
-        HideDynamicControls();
-        UpdateAdvancedVisibility();
-        EnableWindow(generate_, FALSE);
-        EnableWindow(model_, FALSE);
-        busy_ = true;
-        SetStatus(L"Checking selected backend…");
 
         selectedModel_ = static_cast<int>(SendMessageW(model_, CB_GETCURSEL, 0, 0));
-        const fs::path launcher = fs::path(ExecutableDirectory()) / L"engines" /
-                                  (selectedModel_ == 0 ? L"qwen" : L"index") / L"launch.cmd";
+        if (selectedModel_ < 0) selectedModel_ = 0;
 
-        task_ = std::thread([this, launcher] {
-            std::wstring error;
-            if (!backend_.Start(launcher.wstring(), error)) {
-                PostError(error);
-                return;
-            }
-            if (!backend_.Request("{\"command\":\"capabilities\"}", [this](const std::string& line) { PostLine(line); }, error)) {
-                PostError(error);
-            }
-        });
+        capabilities_ = {};
+        if (SelectedEngine() == provision::EngineId::Qwen) {
+            capabilities_.language = true;
+            capabilities_.referenceTranscript = true;
+            capabilities_.xVectorOnly = true;
+            capabilities_.temperature = true;
+            capabilities_.topP = true;
+            capabilities_.topK = true;
+            capabilities_.repetitionPenalty = true;
+            SetLanguageOptions(L"Auto|English|Chinese|Japanese|Korean|German|French|Russian|Portuguese|Spanish|Italian");
+        } else {
+            capabilities_.language = true;
+            capabilities_.emotionText = true;
+            capabilities_.emotionStrength = true;
+            capabilities_.durationFactor = true;
+            capabilities_.temperature = true;
+            capabilities_.topP = true;
+            capabilities_.topK = true;
+            capabilities_.repetitionPenalty = true;
+            SetLanguageOptions(L"English|Chinese|Japanese|Spanish|Arabic");
+        }
+
+        ApplyCapabilities();
+        EnableWindow(generate_, TRUE);
+        UpdateInstallStatus();
     }
 
-    void Generate() {
-        if (busy_) return;
-        const std::wstring voice = GetText(voice_);
-        const std::wstring text = GetText(text_);
+    void UpdateInstallStatus() {
+        const auto engine = SelectedEngine();
+        const auto state = provision::GetState(engine);
+        if (state == provision::State::Ready) {
+            SetStatus(L"Ready.");
+        } else if (state == provision::State::Missing) {
+            SetStatus(std::wstring(provision::DisplayName(engine)) +
+                      L" will install automatically the first time you Generate.");
+        } else {
+            SetStatus(std::wstring(provision::DisplayName(engine)) +
+                      L" needs repair/update; gclone will handle it on Generate.");
+        }
+    }
+
+    bool ConfirmProvision(provision::State state) {
+        const auto engine = SelectedEngine();
+        const std::wstring name = provision::DisplayName(engine);
+        const std::wstring action = state == provision::State::Missing ? L"Install" : L"Repair";
+        const std::wstring instruction = action + L" " + name + L"?";
+        const std::wstring content =
+            (state == provision::State::Missing
+                 ? L"This engine is not installed yet. gclone can download and configure everything it needs automatically."
+                 : L"gclone found an incomplete or older engine runtime and can repair/update it automatically.") +
+            std::wstring(L"\n\nNo system Python or Git installation is required. Files stay under:\n") +
+            provision::EngineRoot(engine).wstring() +
+            L"\n\nThis downloads a large local AI model and can use several gigabytes of disk space.";
+
+        TASKDIALOG_BUTTON button{ID_PROVISION_ACTION, action.c_str()};
+        TASKDIALOGCONFIG config{};
+        config.cbSize = sizeof(config);
+        config.hwndParent = window_;
+        config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+        config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        config.pszWindowTitle = L"gclone";
+        config.pszMainIcon = TD_INFORMATION_ICON;
+        config.pszMainInstruction = instruction.c_str();
+        config.pszContent = content.c_str();
+        config.cButtons = 1;
+        config.pButtons = &button;
+        config.nDefaultButton = ID_PROVISION_ACTION;
+
+        int pressed = 0;
+        const HRESULT hr = TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
+        if (SUCCEEDED(hr)) return pressed == ID_PROVISION_ACTION;
+
+        const std::wstring fallback = content + L"\n\nContinue?";
+        return MessageBoxW(window_, fallback.c_str(), instruction.c_str(),
+                           MB_OKCANCEL | MB_ICONINFORMATION) == IDOK;
+    }
+
+    bool ValidateGeneration(const std::wstring& voice, const std::wstring& text,
+                            std::wstring& transcript) {
         if (voice.empty() || !fs::exists(voice)) {
             MessageBoxW(window_, L"Choose a voice sample first.", L"gclone", MB_OK | MB_ICONINFORMATION);
-            return;
+            return false;
         }
         if (text.empty()) {
             MessageBoxW(window_, L"Paste or type some text to speak.", L"gclone", MB_OK | MB_ICONINFORMATION);
-            return;
+            return false;
         }
 
         const bool xVectorOnly = SendMessageW(xVector_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        const std::wstring transcript = GetText(transcript_);
+        transcript = GetText(transcript_);
         if (capabilities_.referenceTranscript && !xVectorOnly && transcript.empty()) {
             MessageBoxW(window_,
                         L"Qwen's high-fidelity clone mode requires the transcript of the reference sample.\n\n"
                         L"If you do not have it, open Advanced and enable speaker-embedding-only mode.",
                         L"Reference transcript needed", MB_OK | MB_ICONINFORMATION);
-            return;
+            return false;
         }
 
-        StopPlayback();
-        generationCounter_++;
-        const fs::path output = sessionDir_ / (L"generation-" + std::to_wstring(generationCounter_) + L".wav");
-        currentOutput_.clear();
-        EnableWindow(play_, FALSE);
-        EnableWindow(export_, FALSE);
+        if (capabilities_.durationFactor) {
+            double duration = 0.0;
+            if (!TryReadNumber(duration_, duration) || duration < 0.5 || duration > 2.0) {
+                MessageBoxW(window_, L"Speed/duration must be a number from 0.5 through 2.0.",
+                            L"Invalid speed", MB_OK | MB_ICONINFORMATION);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::string BuildGenerationRequest(const std::wstring& voice, const std::wstring& text,
+                                       const std::wstring& transcript) {
+        ++generationCounter_;
+        const fs::path output = sessionDir_ /
+            (L"generation-" + std::to_wstring(generationCounter_) + L".wav");
 
         std::string request = "{\"command\":\"generate\"";
         request += ",\"reference_audio\":\"" + JsonEscape(WideToUtf8(voice)) + "\"";
@@ -455,12 +583,12 @@ private:
             request += ",\"language\":\"" + JsonEscape(WideToUtf8(language)) + "\"";
         }
         if (capabilities_.referenceTranscript) {
+            const bool xVectorOnly = SendMessageW(xVector_, BM_GETCHECK, 0, 0) == BST_CHECKED;
             request += ",\"reference_transcript\":\"" + JsonEscape(WideToUtf8(transcript)) + "\"";
             request += std::string(",\"x_vector_only\":") + (xVectorOnly ? "true" : "false");
         }
         if (capabilities_.emotionText) {
-            const std::wstring emotion = GetText(emotion_);
-            request += ",\"emotion_text\":\"" + JsonEscape(WideToUtf8(emotion)) + "\"";
+            request += ",\"emotion_text\":\"" + JsonEscape(WideToUtf8(GetText(emotion_))) + "\"";
         }
         if (capabilities_.emotionStrength) {
             const int strength = static_cast<int>(SendMessageW(emotionStrength_, TBM_GETPOS, 0, 0));
@@ -472,15 +600,120 @@ private:
         AppendOptionalNumber(request, "top_k", topK_, capabilities_.topK);
         AppendOptionalNumber(request, "repetition_penalty", rep_, capabilities_.repetitionPenalty);
         request += "}";
+        return request;
+    }
+
+    void Generate() {
+        if (busy_) return;
+
+        const std::wstring voice = GetText(voice_);
+        const std::wstring text = GetText(text_);
+        std::wstring transcript;
+        if (!ValidateGeneration(voice, text, transcript)) return;
+
+        const auto state = provision::GetState(SelectedEngine());
+        if (state != provision::State::Ready && !ConfirmProvision(state)) return;
+
+        const std::string request = BuildGenerationRequest(voice, text, transcript);
+        if (state == provision::State::Ready) {
+            StartGeneration(request);
+        } else {
+            StartProvisioning(request);
+        }
+    }
+
+    void StartProvisioning(const std::string& request) {
+        JoinTask();
+        backend_.Stop();
+
+        pendingRequest_ = request;
+        busy_ = true;
+        provisioning_ = true;
+        cancelInstall_ = false;
+        SetProvisionInputsEnabled(false);
+        Show(installProgress_, true);
+        SendMessageW(installProgress_, PBM_SETMARQUEE, TRUE, 35);
+        SetStatus(L"Starting automatic installation…");
+
+        const auto engine = SelectedEngine();
+        const fs::path executableDirectory = ExecutableDirectory();
+        task_ = std::thread([this, engine, executableDirectory] {
+            std::wstring error;
+            const bool ok = provision::RunSetup(
+                engine, executableDirectory,
+                [this](const std::wstring& line) {
+                    constexpr wchar_t prefix[] = L"GCLONE:";
+                    if (line.rfind(prefix, 0) == 0 && window_) {
+                        PostMessageW(window_, WM_APP_INSTALL_LINE, 0,
+                                     reinterpret_cast<LPARAM>(new std::wstring(line.substr(7))));
+                    }
+                },
+                &cancelInstall_, error);
+
+            if (!window_ || shuttingDown_) return;
+            if (ok) {
+                PostMessageW(window_, WM_APP_INSTALL_DONE, 0, 0);
+            } else {
+                PostMessageW(window_, WM_APP_INSTALL_ERROR, 0,
+                             reinterpret_cast<LPARAM>(new std::wstring(error)));
+            }
+        });
+    }
+
+    void OnInstallDone() {
+        JoinTask();
+        provisioning_ = false;
+        SendMessageW(installProgress_, PBM_SETMARQUEE, FALSE, 0);
+        Show(installProgress_, false);
+
+        if (provision::GetState(SelectedEngine()) != provision::State::Ready) {
+            OnInstallError(L"Installation finished, but the engine failed verification. Generate again to repair it.");
+            return;
+        }
+
+        const std::string request = pendingRequest_;
+        pendingRequest_.clear();
+        SetStatus(L"Installation complete. Starting generation…");
+        StartGeneration(request);
+    }
+
+    void OnInstallError(const std::wstring& error) {
+        JoinTask();
+        provisioning_ = false;
+        pendingRequest_.clear();
+        SendMessageW(installProgress_, PBM_SETMARQUEE, FALSE, 0);
+        Show(installProgress_, false);
+        FinishBusy();
+        SetStatus(error);
+        if (!shuttingDown_) {
+            MessageBoxW(window_, error.c_str(), L"Automatic setup failed", MB_OK | MB_ICONERROR);
+        }
+    }
+
+    void StartGeneration(const std::string& request) {
+        JoinTask();
+        StopPlayback();
+        currentOutput_.clear();
+        EnableWindow(play_, FALSE);
+        EnableWindow(export_, FALSE);
 
         busy_ = true;
         EnableWindow(generate_, FALSE);
         EnableWindow(model_, FALSE);
         SetStatus(L"Preparing sample…");
-        JoinTask();
-        task_ = std::thread([this, request] {
+
+        const fs::path launcher = fs::path(ExecutableDirectory()) / L"engines" /
+                                  (SelectedEngine() == provision::EngineId::Qwen ? L"qwen" : L"index") /
+                                  L"launch.cmd";
+
+        task_ = std::thread([this, launcher, request] {
             std::wstring error;
-            if (!backend_.Request(request, [this](const std::string& line) { PostLine(line); }, error)) {
+            if (!backend_.Start(launcher.wstring(), error)) {
+                PostError(error);
+                return;
+            }
+            if (!backend_.Request(request,
+                                  [this](const std::string& line) { PostLine(line); }, error)) {
                 PostError(error);
             }
         });
@@ -488,11 +721,8 @@ private:
 
     void AppendOptionalNumber(std::string& request, const char* key, HWND edit, bool supported) {
         if (!supported) return;
-        const std::wstring value = GetText(edit);
-        if (value.empty()) return;
-        wchar_t* end = nullptr;
-        const double number = wcstod(value.c_str(), &end);
-        if (end == value.c_str() || *end != L'\0') return;
+        double number = 0.0;
+        if (!TryReadNumber(edit, number)) return;
         request += ",\"" + std::string(key) + "\":" + std::to_string(number);
     }
 
@@ -561,35 +791,17 @@ private:
 
     void OnBackendLine(const std::string& line) {
         const std::string event = JsonGetString(line, "event").value_or("");
-        if (event == "capabilities") {
-            capabilities_.language = JsonGetBool(line, "language");
-            capabilities_.referenceTranscript = JsonGetBool(line, "reference_transcript");
-            capabilities_.xVectorOnly = JsonGetBool(line, "x_vector_only");
-            capabilities_.emotionText = JsonGetBool(line, "emotion_text");
-            capabilities_.emotionStrength = JsonGetBool(line, "emotion_strength");
-            capabilities_.durationFactor = JsonGetBool(line, "duration_factor");
-            capabilities_.temperature = JsonGetBool(line, "temperature");
-            capabilities_.topP = JsonGetBool(line, "top_p");
-            capabilities_.topK = JsonGetBool(line, "top_k");
-            capabilities_.repetitionPenalty = JsonGetBool(line, "repetition_penalty");
-            if (const auto options = JsonGetString(line, "language_options")) {
-                SetLanguageOptions(Utf8ToWide(*options));
-            }
-            ApplyCapabilities();
-            FinishBusy();
-            SetStatus(L"Ready.");
-        } else if (event == "status") {
-            const auto message = JsonGetString(line, "message");
-            if (message) SetStatus(Utf8ToWide(*message));
+        if (event == "status") {
+            if (const auto message = JsonGetString(line, "message")) SetStatus(Utf8ToWide(*message));
         } else if (event == "result") {
-            const auto output = JsonGetString(line, "output_path");
-            if (output) currentOutput_ = Utf8ToWide(*output);
+            if (const auto output = JsonGetString(line, "output_path")) currentOutput_ = Utf8ToWide(*output);
             FinishBusy();
             EnableWindow(play_, !currentOutput_.empty());
             EnableWindow(export_, !currentOutput_.empty());
             SetStatus(L"Complete.");
         } else if (event == "error") {
-            const std::wstring message = Utf8ToWide(JsonGetString(line, "message").value_or("Backend error."));
+            const std::wstring message = Utf8ToWide(
+                JsonGetString(line, "message").value_or("Backend error."));
             FinishBusy();
             SetStatus(message);
             MessageBoxW(window_, message.c_str(), L"Generation failed", MB_OK | MB_ICONERROR);
@@ -601,15 +813,21 @@ private:
         size_t start = 0;
         while (start <= options.size()) {
             const size_t end = options.find(L'|', start);
-            const std::wstring item = options.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
-            if (!item.empty()) SendMessageW(language_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+            const std::wstring item = options.substr(
+                start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            if (!item.empty()) {
+                SendMessageW(language_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+            }
             if (end == std::wstring::npos) break;
             start = end + 1;
         }
-        if (SendMessageW(language_, CB_GETCOUNT, 0, 0) > 0) SendMessageW(language_, CB_SETCURSEL, 0, 0);
+        if (SendMessageW(language_, CB_GETCOUNT, 0, 0) > 0) {
+            SendMessageW(language_, CB_SETCURSEL, 0, 0);
+        }
     }
 
     void ApplyCapabilities() {
+        HideDynamicControls();
         Show(languageLabel_, capabilities_.language);
         Show(language_, capabilities_.language);
         Show(transcriptLabel_, capabilities_.referenceTranscript);
@@ -628,7 +846,8 @@ private:
     void UpdateTranscriptRequirement() {
         if (!capabilities_.referenceTranscript) return;
         const bool xVectorOnly = SendMessageW(xVector_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        SetWindowTextW(transcriptLabel_, xVectorOnly ? L"Reference transcript (optional)" : L"Reference transcript");
+        SetWindowTextW(transcriptLabel_,
+                       xVectorOnly ? L"Reference transcript (optional)" : L"Reference transcript");
     }
 
     void HideDynamicControls() {
@@ -648,8 +867,34 @@ private:
         Show(repLabel_, open && capabilities_.repetitionPenalty); Show(rep_, open && capabilities_.repetitionPenalty);
     }
 
+    void SetProvisionInputsEnabled(bool enabled) {
+        EnableWindow(voice_, enabled);
+        EnableWindow(browse_, enabled);
+        EnableWindow(text_, enabled);
+        EnableWindow(model_, enabled);
+        EnableWindow(generate_, enabled);
+        EnableWindow(language_, enabled);
+        EnableWindow(transcript_, enabled);
+        EnableWindow(emotion_, enabled);
+        EnableWindow(emotionStrength_, enabled);
+        EnableWindow(duration_, enabled);
+        EnableWindow(advanced_, enabled);
+        EnableWindow(xVector_, enabled);
+        EnableWindow(temp_, enabled);
+        EnableWindow(topP_, enabled);
+        EnableWindow(topK_, enabled);
+        EnableWindow(rep_, enabled);
+        EnableWindow(play_, enabled && !currentOutput_.empty());
+        EnableWindow(export_, enabled && !currentOutput_.empty());
+        EnableWindow(seek_, enabled);
+    }
+
     void FinishBusy() {
         busy_ = false;
+        provisioning_ = false;
+        SendMessageW(installProgress_, PBM_SETMARQUEE, FALSE, 0);
+        Show(installProgress_, false);
+        SetProvisionInputsEnabled(true);
         EnableWindow(model_, TRUE);
         EnableWindow(generate_, TRUE);
     }
@@ -661,11 +906,17 @@ private:
     }
 
     void PostLine(const std::string& line) {
-        if (window_) PostMessageW(window_, WM_APP_BACKEND_LINE, 0, reinterpret_cast<LPARAM>(new std::string(line)));
+        if (window_) {
+            PostMessageW(window_, WM_APP_BACKEND_LINE, 0,
+                         reinterpret_cast<LPARAM>(new std::string(line)));
+        }
     }
 
     void PostError(const std::wstring& error) {
-        if (window_) PostMessageW(window_, WM_APP_BACKEND_ERROR, 0, reinterpret_cast<LPARAM>(new std::wstring(error)));
+        if (window_) {
+            PostMessageW(window_, WM_APP_BACKEND_ERROR, 0,
+                         reinterpret_cast<LPARAM>(new std::wstring(error)));
+        }
     }
 
     void JoinTask() {
@@ -674,6 +925,7 @@ private:
 
     void Shutdown() {
         if (shuttingDown_.exchange(true)) return;
+        cancelInstall_ = true;
         KillTimer(window_, 1);
         StopPlayback();
         backend_.Stop();
@@ -695,12 +947,14 @@ private:
     HWND generate_ = nullptr, play_ = nullptr, seek_ = nullptr, time_ = nullptr, export_ = nullptr;
     HWND advanced_ = nullptr, xVector_ = nullptr, tempLabel_ = nullptr, temp_ = nullptr;
     HWND topPLabel_ = nullptr, topP_ = nullptr, topKLabel_ = nullptr, topK_ = nullptr;
-    HWND repLabel_ = nullptr, rep_ = nullptr, status_ = nullptr;
+    HWND repLabel_ = nullptr, rep_ = nullptr, status_ = nullptr, installProgress_ = nullptr;
 
     BackendProcess backend_;
     std::thread task_;
     std::atomic<bool> shuttingDown_ = false;
+    std::atomic<bool> cancelInstall_ = false;
     bool busy_ = false;
+    bool provisioning_ = false;
     bool playbackOpen_ = false;
     bool playing_ = false;
     int selectedModel_ = 0;
@@ -708,6 +962,7 @@ private:
     Capabilities capabilities_;
     fs::path sessionDir_;
     std::wstring currentOutput_;
+    std::string pendingRequest_;
 };
 }  // namespace
 
