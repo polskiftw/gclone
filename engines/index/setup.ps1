@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    throw "Git is required to install the official IndexTTS runtime."
+    throw "Git is required to install the official IndexTTS 2.5 runtime."
 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     py -3.11 -m pip install --user --upgrade uv
@@ -11,16 +11,19 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 
 if (-not (Test-Path runtime\.git)) {
     git clone --depth 1 https://github.com/index-tts/index-tts.git runtime
+} else {
+    Write-Host "Updating the official IndexTTS runtime..."
+    git -C runtime pull --ff-only
 }
 
-Write-Host "Creating the isolated IndexTTS environment using the upstream-supported uv workflow..."
+Write-Host "Creating the isolated IndexTTS 2.5 environment using the upstream uv workflow..."
 uv sync --project runtime
 
-if (-not (Test-Path runtime\checkpoints\config.yaml)) {
-    Write-Host "Downloading official IndexTTS2 model files..."
-    uvx --from "huggingface-hub[cli,hf_xet]" hf download IndexTeam/IndexTTS-2 --local-dir runtime/checkpoints
-}
+Write-Host "Reconciling official IndexTTS 2.5 model files..."
+# Always target the official 2.5 snapshot. huggingface-hub reuses its cache, so already-current
+# files are not needlessly downloaded, and an old pre-2.5 gclone checkpoint directory is upgraded.
+uvx --from "huggingface-hub[cli,hf_xet]" hf download IndexTeam/IndexTTS-2.5 --local-dir runtime/checkpoints
 
 Write-Host ""
-Write-Host "IndexTTS 2 runtime is ready."
-Write-Host "Note: the published IndexTTS 2.5 technical report does not yet have an official runnable release."
+Write-Host "IndexTTS 2.5 runtime is ready."
+Write-Host "gclone will load the main model lazily when Generate is clicked."

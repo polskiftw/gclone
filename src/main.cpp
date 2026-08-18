@@ -37,6 +37,8 @@ constexpr int IDC_EMOTION_LABEL = 114;
 constexpr int IDC_EMOTION = 115;
 constexpr int IDC_EMOTION_STRENGTH_LABEL = 116;
 constexpr int IDC_EMOTION_STRENGTH = 117;
+constexpr int IDC_DURATION_LABEL = 118;
+constexpr int IDC_DURATION = 119;
 constexpr int IDC_GENERATE = 120;
 constexpr int IDC_PLAY = 121;
 constexpr int IDC_SEEK = 122;
@@ -131,6 +133,7 @@ struct Capabilities {
     bool xVectorOnly = false;
     bool emotionText = false;
     bool emotionStrength = false;
+    bool durationFactor = false;
     bool temperature = false;
     bool topP = false;
     bool topK = false;
@@ -158,7 +161,7 @@ public:
 
         window_ = CreateWindowExW(0, kWindowClass, L"gclone", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
                                       WS_MINIMIZEBOX,
-                                  CW_USEDEFAULT, CW_USEDEFAULT, 760, 860, nullptr, nullptr, instance_, this);
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 760, 900, nullptr, nullptr, instance_, this);
         if (!window_) return false;
         ShowWindow(window_, showCommand);
         UpdateWindow(window_);
@@ -254,20 +257,16 @@ private:
 
         MakeStatic(L"Model", 24, 318, 100, 22);
         model_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                 24, 342, 696, 200, window_, reinterpret_cast<HMENU>(IDC_MODEL), instance_, nullptr);
+                                 24, 342, 696, 200, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MODEL)), instance_, nullptr);
         SetFont(model_, font_);
         SendMessageW(model_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Qwen3-TTS 12Hz 1.7B Base — Voice Clone"));
-        SendMessageW(model_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"IndexTTS 2 — current runnable release"));
+        SendMessageW(model_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"IndexTTS 2.5 — Voice Clone"));
         SendMessageW(model_, CB_SETCURSEL, 0, 0);
 
         languageLabel_ = MakeStatic(L"Language", 24, 382, 110, 22, IDC_LANGUAGE_LABEL);
         language_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
-                                    140, 378, 220, 200, window_, reinterpret_cast<HMENU>(IDC_LANGUAGE), instance_, nullptr);
+                                    140, 378, 220, 200, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LANGUAGE)), instance_, nullptr);
         SetFont(language_, font_);
-        const wchar_t* languages[] = {L"Auto", L"English", L"Chinese", L"Japanese", L"Korean", L"German",
-                                      L"French", L"Russian", L"Portuguese", L"Spanish", L"Italian"};
-        for (const auto* language : languages) SendMessageW(language_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(language));
-        SendMessageW(language_, CB_SETCURSEL, 0, 0);
 
         transcriptLabel_ = MakeStatic(L"Reference transcript", 24, 418, 150, 22, IDC_TRANSCRIPT_LABEL);
         transcript_ = MakeEdit(IDC_TRANSCRIPT, 180, 414, 540, 54, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
@@ -276,32 +275,37 @@ private:
         emotion_ = MakeEdit(IDC_EMOTION, 180, 378, 540, 54, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
         emotionStrengthLabel_ = MakeStatic(L"Emotion strength", 24, 442, 150, 22, IDC_EMOTION_STRENGTH_LABEL);
         emotionStrength_ = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
-                                           180, 438, 300, 32, window_, reinterpret_cast<HMENU>(IDC_EMOTION_STRENGTH), instance_, nullptr);
+                                           180, 438, 300, 32, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EMOTION_STRENGTH)), instance_, nullptr);
         SendMessageW(emotionStrength_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
         SendMessageW(emotionStrength_, TBM_SETPOS, TRUE, 60);
 
-        generate_ = MakeButton(L"Generate", IDC_GENERATE, 292, 486, 170, 38, BS_DEFPUSHBUTTON);
+        durationLabel_ = MakeStatic(L"Speed", 24, 478, 150, 22, IDC_DURATION_LABEL);
+        duration_ = MakeEdit(IDC_DURATION, 180, 474, 90, 26);
+        SetWindowTextW(duration_, L"1.0");
+        durationHint_ = MakeStatic(L"0.5–2.0× duration", 280, 478, 180, 22);
 
-        play_ = MakeButton(L"▶", IDC_PLAY, 24, 548, 50, 32);
+        generate_ = MakeButton(L"Generate", IDC_GENERATE, 292, 522, 170, 38, BS_DEFPUSHBUTTON);
+
+        play_ = MakeButton(L"▶", IDC_PLAY, 24, 584, 50, 32);
         seek_ = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ,
-                                84, 548, 520, 32, window_, reinterpret_cast<HMENU>(IDC_SEEK), instance_, nullptr);
+                                84, 584, 520, 32, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEEK)), instance_, nullptr);
         SendMessageW(seek_, TBM_SETRANGE, TRUE, MAKELPARAM(0, 1000));
-        time_ = MakeStatic(L"0:00 / 0:00", 614, 554, 105, 22, IDC_TIME);
-        export_ = MakeButton(L"Export…", IDC_EXPORT, 24, 598, 120, 32);
+        time_ = MakeStatic(L"0:00 / 0:00", 614, 590, 105, 22, IDC_TIME);
+        export_ = MakeButton(L"Export…", IDC_EXPORT, 24, 634, 120, 32);
 
-        advanced_ = MakeButton(L"Advanced", IDC_ADVANCED, 24, 646, 130, 26, BS_AUTOCHECKBOX);
+        advanced_ = MakeButton(L"Advanced", IDC_ADVANCED, 24, 682, 130, 26, BS_AUTOCHECKBOX);
         xVector_ = MakeButton(L"Speaker embedding only (lower fidelity; transcript optional)", IDC_XVECTOR,
-                              42, 682, 430, 24, BS_AUTOCHECKBOX);
-        tempLabel_ = MakeStatic(L"Temperature", 42, 718, 90, 22, IDC_TEMP_LABEL);
-        temp_ = MakeEdit(IDC_TEMP, 136, 714, 70, 26);
-        topPLabel_ = MakeStatic(L"Top-p", 230, 718, 52, 22, IDC_TOPP_LABEL);
-        topP_ = MakeEdit(IDC_TOPP, 286, 714, 70, 26);
-        topKLabel_ = MakeStatic(L"Top-k", 380, 718, 52, 22, IDC_TOPK_LABEL);
-        topK_ = MakeEdit(IDC_TOPK, 436, 714, 70, 26);
-        repLabel_ = MakeStatic(L"Repetition", 528, 718, 78, 22, IDC_REP_LABEL);
-        rep_ = MakeEdit(IDC_REP, 612, 714, 70, 26);
+                              42, 718, 430, 24, BS_AUTOCHECKBOX);
+        tempLabel_ = MakeStatic(L"Temperature", 42, 754, 90, 22, IDC_TEMP_LABEL);
+        temp_ = MakeEdit(IDC_TEMP, 136, 750, 70, 26);
+        topPLabel_ = MakeStatic(L"Top-p", 230, 754, 52, 22, IDC_TOPP_LABEL);
+        topP_ = MakeEdit(IDC_TOPP, 286, 750, 70, 26);
+        topKLabel_ = MakeStatic(L"Top-k", 380, 754, 52, 22, IDC_TOPK_LABEL);
+        topK_ = MakeEdit(IDC_TOPK, 436, 750, 70, 26);
+        repLabel_ = MakeStatic(L"Repetition", 528, 754, 78, 22, IDC_REP_LABEL);
+        rep_ = MakeEdit(IDC_REP, 612, 750, 70, 26);
 
-        status_ = MakeStatic(L"Status: Starting…", 24, 780, 696, 24, IDC_STATUS);
+        status_ = MakeStatic(L"Status: Starting…", 24, 816, 696, 24, IDC_STATUS);
 
         EnableWindow(generate_, FALSE);
         EnableWindow(play_, FALSE);
@@ -462,6 +466,7 @@ private:
             const int strength = static_cast<int>(SendMessageW(emotionStrength_, TBM_GETPOS, 0, 0));
             request += ",\"emotion_strength\":" + std::to_string(strength / 100.0);
         }
+        AppendOptionalNumber(request, "duration_factor", duration_, capabilities_.durationFactor);
         AppendOptionalNumber(request, "temperature", temp_, capabilities_.temperature);
         AppendOptionalNumber(request, "top_p", topP_, capabilities_.topP);
         AppendOptionalNumber(request, "top_k", topK_, capabilities_.topK);
@@ -562,10 +567,14 @@ private:
             capabilities_.xVectorOnly = JsonGetBool(line, "x_vector_only");
             capabilities_.emotionText = JsonGetBool(line, "emotion_text");
             capabilities_.emotionStrength = JsonGetBool(line, "emotion_strength");
+            capabilities_.durationFactor = JsonGetBool(line, "duration_factor");
             capabilities_.temperature = JsonGetBool(line, "temperature");
             capabilities_.topP = JsonGetBool(line, "top_p");
             capabilities_.topK = JsonGetBool(line, "top_k");
             capabilities_.repetitionPenalty = JsonGetBool(line, "repetition_penalty");
+            if (const auto options = JsonGetString(line, "language_options")) {
+                SetLanguageOptions(Utf8ToWide(*options));
+            }
             ApplyCapabilities();
             FinishBusy();
             SetStatus(L"Ready.");
@@ -587,6 +596,19 @@ private:
         }
     }
 
+    void SetLanguageOptions(const std::wstring& options) {
+        SendMessageW(language_, CB_RESETCONTENT, 0, 0);
+        size_t start = 0;
+        while (start <= options.size()) {
+            const size_t end = options.find(L'|', start);
+            const std::wstring item = options.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            if (!item.empty()) SendMessageW(language_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+            if (end == std::wstring::npos) break;
+            start = end + 1;
+        }
+        if (SendMessageW(language_, CB_GETCOUNT, 0, 0) > 0) SendMessageW(language_, CB_SETCURSEL, 0, 0);
+    }
+
     void ApplyCapabilities() {
         Show(languageLabel_, capabilities_.language);
         Show(language_, capabilities_.language);
@@ -596,6 +618,9 @@ private:
         Show(emotion_, capabilities_.emotionText);
         Show(emotionStrengthLabel_, capabilities_.emotionStrength);
         Show(emotionStrength_, capabilities_.emotionStrength);
+        Show(durationLabel_, capabilities_.durationFactor);
+        Show(duration_, capabilities_.durationFactor);
+        Show(durationHint_, capabilities_.durationFactor);
         UpdateTranscriptRequirement();
         UpdateAdvancedVisibility();
     }
@@ -611,6 +636,7 @@ private:
         Show(transcriptLabel_, false); Show(transcript_, false);
         Show(emotionLabel_, false); Show(emotion_, false);
         Show(emotionStrengthLabel_, false); Show(emotionStrength_, false);
+        Show(durationLabel_, false); Show(duration_, false); Show(durationHint_, false);
     }
 
     void UpdateAdvancedVisibility() {
@@ -665,6 +691,7 @@ private:
     HWND voice_ = nullptr, browse_ = nullptr, text_ = nullptr, model_ = nullptr;
     HWND languageLabel_ = nullptr, language_ = nullptr, transcriptLabel_ = nullptr, transcript_ = nullptr;
     HWND emotionLabel_ = nullptr, emotion_ = nullptr, emotionStrengthLabel_ = nullptr, emotionStrength_ = nullptr;
+    HWND durationLabel_ = nullptr, duration_ = nullptr, durationHint_ = nullptr;
     HWND generate_ = nullptr, play_ = nullptr, seek_ = nullptr, time_ = nullptr, export_ = nullptr;
     HWND advanced_ = nullptr, xVector_ = nullptr, tempLabel_ = nullptr, temp_ = nullptr;
     HWND topPLabel_ = nullptr, topP_ = nullptr, topKLabel_ = nullptr, topK_ = nullptr;
