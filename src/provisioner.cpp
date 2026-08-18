@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -54,6 +55,23 @@ fs::path SetupScript(provision::EngineId engine, const fs::path& executableDirec
     return executableDirectory / L"engines" /
            (engine == provision::EngineId::Qwen ? L"qwen" : L"index") / L"setup.ps1";
 }
+
+void ConsumeOutput(const char* data, DWORD size, std::string& pending,
+                   std::wstring& lastLine,
+                   const std::function<void(const std::wstring&)>& onLine) {
+    for (DWORD i = 0; i < size; ++i) {
+        const char ch = data[i];
+        if (ch == '\r' || ch == '\n') {
+            if (!pending.empty()) {
+                lastLine = BytesToWide(pending);
+                if (onLine) onLine(lastLine);
+                pending.clear();
+            }
+        } else {
+            pending.push_back(ch);
+        }
+    }
+}
 }  // namespace
 
 namespace provision {
@@ -99,6 +117,7 @@ State GetState(EngineId engine) {
 bool RunSetup(EngineId engine,
               const fs::path& executableDirectory,
               const std::function<void(const std::wstring&)>& onLine,
+              const std::atomic<bool>* cancel,
               std::wstring& error) {
     const fs::path script = SetupScript(engine, executableDirectory);
     if (!Exists(script)) {
@@ -150,24 +169,40 @@ bool RunSetup(EngineId engine,
     std::string pending;
     std::wstring lastLine;
     char buffer[4096];
-    for (;;) {
-        DWORD read = 0;
-        const BOOL ok = ReadFile(readPipe, buffer, static_cast<DWORD>(sizeof(buffer)), &read, nullptr);
-        if (!ok || read == 0) break;
+    bool cancelled = false;
 
-        for (DWORD i = 0; i < read; ++i) {
-            const char ch = buffer[i];
-            if (ch == '\r' || ch == '\n') {
-                if (!pending.empty()) {
-                    lastLine = BytesToWide(pending);
-                    if (onLine) onLine(lastLine);
-                    pending.clear();
-                }
-            } else {
-                pending.push_back(ch);
+    for (;;) {
+        if (cancel && cancel->load()) {
+            cancelled = true;
+            TerminateProcess(pi.hProcess, ERROR_CANCELLED);
+        }
+
+        DWORD available = 0;
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            break;
+        }
+        if (available > 0) {
+            DWORD read = 0;
+            const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(sizeof(buffer)));
+            if (ReadFile(readPipe, buffer, wanted, &read, nullptr) && read > 0) {
+                ConsumeOutput(buffer, read, pending, lastLine, onLine);
             }
+            continue;
+        }
+
+        if (WaitForSingleObject(pi.hProcess, 60) == WAIT_OBJECT_0) {
+            for (;;) {
+                available = 0;
+                if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || available == 0) break;
+                DWORD read = 0;
+                const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(sizeof(buffer)));
+                if (!ReadFile(readPipe, buffer, wanted, &read, nullptr) || read == 0) break;
+                ConsumeOutput(buffer, read, pending, lastLine, onLine);
+            }
+            break;
         }
     }
+
     if (!pending.empty()) {
         lastLine = BytesToWide(pending);
         if (onLine) onLine(lastLine);
@@ -181,6 +216,10 @@ bool RunSetup(EngineId engine,
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
+    if (cancelled) {
+        error = L"Installation cancelled.";
+        return false;
+    }
     if (exitCode != 0) {
         error = L"Automatic setup failed (exit code " + std::to_wstring(exitCode) + L").";
         if (!lastLine.empty()) error += L"\n\nLast installer message:\n" + lastLine;
