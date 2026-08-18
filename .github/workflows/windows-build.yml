@@ -32,6 +32,27 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+      - name: Smoke app-local uv and managed Python bootstrap
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = Join-Path $env:RUNNER_TEMP "gclone-provision-smoke"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $root
+          try {
+            . .\engines\common\bootstrap-uv.ps1
+            $uv = Initialize-GCloneUv -GCloneRoot $root
+            & $uv --version
+            if ($LASTEXITCODE -ne 0) { throw "uv bootstrap smoke test failed." }
+            & $uv python install 3.11 3.12
+            if ($LASTEXITCODE -ne 0) { throw "Managed Python bootstrap smoke test failed." }
+            & $uv python find 3.11
+            if ($LASTEXITCODE -ne 0) { throw "Managed Python 3.11 was not found after installation." }
+            & $uv python find 3.12
+            if ($LASTEXITCODE -ne 0) { throw "Managed Python 3.12 was not found after installation." }
+          }
+          finally {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $root
+          }
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:

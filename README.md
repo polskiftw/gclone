@@ -33,11 +33,13 @@ Engine runtimes and model data are user-local rather than stored beside the exec
 
 On first use, gclone bootstraps its own private `uv` executable and lets `uv` obtain the required managed Python versions. Nothing is added to the user's PATH or shell profile, and gclone does not require a pre-existing system Python installation.
 
-Qwen provisioning creates a private Python 3.12 environment, installs the official `qwen-tts` package, and downloads `Qwen/Qwen3-TTS-12Hz-1.7B-Base` into gclone's local Hugging Face cache.
+Qwen provisioning creates a private Python 3.12 environment, installs a pinned CUDA 12.8 PyTorch/torchaudio pair before the official `qwen-tts` package, verifies that PyTorch can actually see an NVIDIA CUDA device, and downloads `Qwen/Qwen3-TTS-12Hz-1.7B-Base` into gclone's local Hugging Face cache. A CPU-only PyTorch environment is not accepted as Ready.
 
 Index provisioning downloads the reviewed official IndexTTS source snapshot, creates a private upstream-compatible `uv` environment, and downloads the official `IndexTeam/IndexTTS-2.5` checkpoints. System Git is not required.
 
 Each engine has a versioned ready marker. Missing markers, incomplete runtime files, or future marker-version changes are treated as repair/update states. Re-running provisioning is safe: package/model caches are reused where possible, so an interrupted download can be retried instead of intentionally starting from zero.
+
+The native provisioner runs setup inside a Windows Job Object with kill-on-close semantics. Cancelling or closing gclone during setup terminates the provisioning process tree instead of intentionally leaving hidden `uv`/Python download children behind.
 
 The bundled `setup.ps1` files remain in the repository as implementation/recovery tools, but users are not expected to run them manually.
 

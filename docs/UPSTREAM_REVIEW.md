@@ -1,6 +1,6 @@
 # Upstream integration and licensing review
 
-Reviewed for the initial implementation on 2026-08-17 and updated for automatic provisioning on 2026-08-18.
+Reviewed for the initial implementation on 2026-08-17 and updated for automatic provisioning / first-run hardening on 2026-08-18.
 
 ## Qwen3-TTS
 
@@ -17,11 +17,13 @@ Current findings:
 - `x_vector_only_mode=True` permits speaker-embedding-only cloning without transcript, with reduced clone quality.
 - Clone prompts can be precomputed with `create_voice_clone_prompt(...)` and reused, which is what the gclone worker does.
 - Qwen accepts `language="Auto"` for language-adaptive generation.
+- The current `qwen-tts` package depends on `torchaudio` but does not itself select a CUDA wheel index. Upstream users have reported clean Windows installs resolving to CPU-only PyTorch, which is incompatible with gclone's `cuda:0` backend.
 
 Integration decision:
 
 - Provision Qwen under `%LOCALAPPDATA%\gclone\runtimes\qwen`, not beside `gclone.exe`.
 - Use an app-private Python 3.12 environment managed by gclone's app-local `uv` installation.
+- Install the official PyTorch/torchaudio 2.8.0 CUDA 12.8 wheels before `qwen-tts==0.1.1`, then explicitly verify `torch.version.cuda` and `torch.cuda.is_available()` before writing the Ready marker. This prevents a syntactically successful but CPU-only Qwen installation from being treated as usable.
 - Download the Qwen model during the first-run Install flow so Generate does not silently begin a multi-gigabyte model download after setup supposedly completed.
 - Do not vendor Qwen source or model weights in the repository/build artifact.
 - Use the public Python API instead of an upstream web UI.
@@ -59,6 +61,8 @@ Automatic-provisioning decision:
 Normal users are not expected to install Python, Git, `uv`, packages, or model weights themselves. `gclone.exe` invokes the bundled setup scripts as an implementation detail only after the user explicitly chooses Install/Repair from the first-Generate flow.
 
 `uv` is bootstrapped into `%LOCALAPPDATA%\gclone\tools\uv` using Astral's official PowerShell installer with an unmanaged install directory. Its cache and managed Python installation directories are redirected into `%LOCALAPPDATA%\gclone\uv`, and it does not modify the user's PATH/shell profile.
+
+The native installer runner places PowerShell and its descendants in a Windows Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Cancelling setup or closing gclone therefore terminates the provisioning process tree rather than only the parent shell.
 
 The readiness markers are deliberately versioned. A future runtime layout/model integration change can bump the expected marker and cause gclone to offer Repair/Update without pretending an old installation is current.
 
