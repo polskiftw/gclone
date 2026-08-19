@@ -94,8 +94,6 @@ gclone.exe
 
 Workers communicate with newline-delimited JSON over redirected stdin/stdout. Switching model families terminates the previous worker, giving gclone a hard process boundary for Python dependencies and GPU-memory release.
 
-See `engines/PROTOCOL.md` and `docs/UPSTREAM_REVIEW.md`.
-
 ## License
 
 `gclone` is licensed under the PolyForm Noncommercial License 1.0.0.
