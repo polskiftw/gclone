@@ -47,11 +47,15 @@ The bundled `setup.ps1` files remain in the repository as implementation/recover
 
 ### Qwen3-TTS 12Hz 1.7B Base
 
+[![Hugging Face: Qwen3-TTS 12Hz 1.7B Base](https://img.shields.io/badge/Hugging%20Face-Qwen3--TTS%2012Hz%201.7B%20Base-FFD21E?logo=huggingface&logoColor=000)](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base)
+
 `gclone` uses the official `Qwen3TTSModel` voice-clone API. High-fidelity mode uses the reference sample plus its transcript. Advanced speaker-embedding-only mode can omit the transcript at reduced cloning fidelity.
 
 The model is loaded lazily only for generation. A clone prompt is cached inside the worker and reused while the same reference sample/settings remain active.
 
 ### IndexTTS-2.5
+
+[![Hugging Face: IndexTTS-2.5](https://img.shields.io/badge/Hugging%20Face-IndexTTS--2.5-FFD21E?logo=huggingface&logoColor=000)](https://huggingface.co/IndexTeam/IndexTTS-2.5)
 
 The Index backend uses the official runnable IndexTTS-2.5 API and `IndexTeam/IndexTTS-2.5` checkpoints through `indextts.infer_v2_5.IndexTTS2` rather than the upstream Gradio UI.
 
@@ -98,4 +102,4 @@ Workers communicate with newline-delimited JSON over redirected stdin/stdout. Sw
 
 `gclone` is licensed under the PolyForm Noncommercial License 1.0.0.
 
-`gclone` installs [Qwen3-TTS 12Hz 1.7B Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) and [IndexTTS-2.5](https://huggingface.co/IndexTeam/IndexTTS-2.5). Those models and their associated third-party software are governed by their own licenses.
+`gclone` installs Qwen3-TTS 12Hz 1.7B Base and IndexTTS-2.5. Those models and their associated third-party software are governed by their own licenses.
