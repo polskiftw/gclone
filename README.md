@@ -96,6 +96,8 @@ Workers communicate with newline-delimited JSON over redirected stdin/stdout. Sw
 
 See `engines/PROTOCOL.md` and `docs/UPSTREAM_REVIEW.md`.
 
-## License status
+## License
 
-No wrapper license has been selected yet. This remains intentional while the upstream boundary is being finalized. See `docs/UPSTREAM_REVIEW.md`.
+`gclone` is licensed under the PolyForm Noncommercial License 1.0.0.
+
+`gclone` installs Qwen3-TTS 12Hz 1.7B Base and IndexTTS-2.5. Those models and their associated third-party software are not licensed by me and are governed by their own licenses.
