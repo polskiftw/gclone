@@ -100,4 +100,4 @@ See `engines/PROTOCOL.md` and `docs/UPSTREAM_REVIEW.md`.
 
 `gclone` is licensed under the PolyForm Noncommercial License 1.0.0.
 
-`gclone` installs Qwen3-TTS 12Hz 1.7B Base and IndexTTS-2.5. Those models and their associated third-party software are not licensed by me and are governed by their own licenses.
+`gclone` installs [Qwen3-TTS 12Hz 1.7B Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) and [IndexTTS-2.5](https://huggingface.co/IndexTeam/IndexTTS-2.5). Those models and their associated third-party software are governed by their own licenses.
