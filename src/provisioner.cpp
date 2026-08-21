@@ -156,7 +156,7 @@ fs::path EngineRoot(EngineId engine) {
 State GetState(EngineId engine) {
     const fs::path root = EngineRoot(engine);
     if (engine == EngineId::Qwen) {
-        const bool ready = Exists(root / L".ready-qwen-1.7b-v2") &&
+        const bool ready = Exists(root / L".ready-qwen-1.7b-v3") &&
                            Exists(root / L".venv" / L"Scripts" / L"python.exe");
         if (ready) return State::Ready;
     } else {
