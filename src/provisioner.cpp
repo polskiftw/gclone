@@ -4,13 +4,18 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <cwctype>
+#include <deque>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
 
 namespace {
+constexpr size_t kRecentInstallerLineCount = 16;
+
 std::wstring LastErrorMessage(const wchar_t* prefix) {
     const DWORD code = GetLastError();
     wchar_t* buffer = nullptr;
@@ -46,6 +51,38 @@ std::wstring BytesToWide(const std::string& value) {
     return out;
 }
 
+std::wstring CleanInstallerLine(const std::wstring& value) {
+    std::wstring out;
+    out.reserve(value.size());
+
+    for (size_t i = 0; i < value.size();) {
+        const wchar_t ch = value[i];
+
+        // Strip ANSI/VT CSI color and progress sequences before showing installer output in
+        // native UI. The complete unmodified byte stream is still kept in the setup log.
+        if (ch == 0x1b && i + 1 < value.size() && value[i + 1] == L'[') {
+            i += 2;
+            while (i < value.size()) {
+                const wchar_t code = value[i++];
+                if (code >= 0x40 && code <= 0x7e) break;
+            }
+            continue;
+        }
+
+        ++i;
+        if (ch == L'\t' || ch >= L' ') out.push_back(ch);
+    }
+
+    const auto first = std::find_if_not(out.begin(), out.end(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0;
+    });
+    const auto last = std::find_if_not(out.rbegin(), out.rend(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0;
+    }).base();
+    if (first >= last) return {};
+    return std::wstring(first, last);
+}
+
 bool Exists(const fs::path& path) {
     std::error_code ec;
     return fs::exists(path, ec);
@@ -56,21 +93,40 @@ fs::path SetupScript(provision::EngineId engine, const fs::path& executableDirec
            (engine == provision::EngineId::Qwen ? L"qwen" : L"index") / L"setup.ps1";
 }
 
+void RecordInstallerLine(const std::string& bytes,
+                         std::deque<std::wstring>& recentLines,
+                         const std::function<void(const std::wstring&)>& onLine) {
+    const std::wstring line = CleanInstallerLine(BytesToWide(bytes));
+    if (line.empty()) return;
+
+    if (recentLines.size() >= kRecentInstallerLineCount) recentLines.pop_front();
+    recentLines.push_back(line);
+    if (onLine) onLine(line);
+}
+
 void ConsumeOutput(const char* data, DWORD size, std::string& pending,
-                   std::wstring& lastLine,
+                   std::deque<std::wstring>& recentLines,
                    const std::function<void(const std::wstring&)>& onLine) {
     for (DWORD i = 0; i < size; ++i) {
         const char ch = data[i];
         if (ch == '\r' || ch == '\n') {
             if (!pending.empty()) {
-                lastLine = BytesToWide(pending);
-                if (onLine) onLine(lastLine);
+                RecordInstallerLine(pending, recentLines, onLine);
                 pending.clear();
             }
         } else {
             pending.push_back(ch);
         }
     }
+}
+
+std::wstring RecentInstallerOutput(const std::deque<std::wstring>& lines) {
+    std::wstring out;
+    for (const auto& line : lines) {
+        if (!out.empty()) out += L"\n";
+        out += line;
+    }
+    return out;
 }
 }  // namespace
 
@@ -124,6 +180,13 @@ bool RunSetup(EngineId engine,
         error = L"The bundled engine installer is missing: " + script.wstring();
         return false;
     }
+
+    const fs::path logDirectory = DataRoot() / L"logs";
+    std::error_code logDirectoryError;
+    fs::create_directories(logDirectory, logDirectoryError);
+    const fs::path logPath = logDirectory /
+        (engine == EngineId::Qwen ? L"qwen-setup.log" : L"index-setup.log");
+    std::ofstream logFile(logPath, std::ios::binary | std::ios::trunc);
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -211,9 +274,17 @@ bool RunSetup(EngineId engine,
     }
 
     std::string pending;
-    std::wstring lastLine;
+    std::deque<std::wstring> recentLines;
     char buffer[4096];
     bool cancelled = false;
+
+    auto consumeChunk = [&](const char* data, DWORD size) {
+        if (logFile.is_open()) {
+            logFile.write(data, static_cast<std::streamsize>(size));
+            logFile.flush();
+        }
+        ConsumeOutput(data, size, pending, recentLines, onLine);
+    };
 
     for (;;) {
         if (!cancelled && cancel && cancel->load()) {
@@ -229,7 +300,7 @@ bool RunSetup(EngineId engine,
             DWORD read = 0;
             const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(sizeof(buffer)));
             if (ReadFile(readPipe, buffer, wanted, &read, nullptr) && read > 0) {
-                ConsumeOutput(buffer, read, pending, lastLine, onLine);
+                consumeChunk(buffer, read);
             }
             continue;
         }
@@ -241,15 +312,14 @@ bool RunSetup(EngineId engine,
                 DWORD read = 0;
                 const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(sizeof(buffer)));
                 if (!ReadFile(readPipe, buffer, wanted, &read, nullptr) || read == 0) break;
-                ConsumeOutput(buffer, read, pending, lastLine, onLine);
+                consumeChunk(buffer, read);
             }
             break;
         }
     }
 
     if (!pending.empty()) {
-        lastLine = BytesToWide(pending);
-        if (onLine) onLine(lastLine);
+        RecordInstallerLine(pending, recentLines, onLine);
     }
 
     CloseHandle(readPipe);
@@ -263,6 +333,7 @@ bool RunSetup(EngineId engine,
     // KILL_ON_JOB_CLOSE is intentional: if a child somehow outlived PowerShell, do not leave
     // a hidden uv/python/model download process running after gclone considers setup finished.
     CloseHandle(job);
+    if (logFile.is_open()) logFile.close();
 
     if (cancelled) {
         error = L"Installation cancelled.";
@@ -270,12 +341,15 @@ bool RunSetup(EngineId engine,
     }
     if (exitCode != 0) {
         error = L"Automatic setup failed (exit code " + std::to_wstring(exitCode) + L").";
-        if (!lastLine.empty()) error += L"\n\nLast installer message:\n" + lastLine;
+        const std::wstring recent = RecentInstallerOutput(recentLines);
+        if (!recent.empty()) error += L"\n\nRecent installer output:\n" + recent;
+        if (!logDirectoryError && Exists(logPath)) error += L"\n\nFull log:\n" + logPath.wstring();
         return false;
     }
 
     if (GetState(engine) != State::Ready) {
         error = L"Setup completed, but gclone could not verify the installed runtime. Run Generate again to repair it.";
+        if (!logDirectoryError && Exists(logPath)) error += L"\n\nFull log:\n" + logPath.wstring();
         return false;
     }
     return true;
