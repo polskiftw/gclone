@@ -8,12 +8,14 @@ $gcloneRoot = Join-Path $env:LOCALAPPDATA "gclone"
 $engineRoot = Join-Path $gcloneRoot "runtimes\qwen"
 $venv = Join-Path $engineRoot ".venv"
 $python = Join-Path $venv "Scripts\python.exe"
-$marker = Join-Path $engineRoot ".ready-qwen-1.7b-v2"
-$oldMarker = Join-Path $engineRoot ".ready-qwen-1.7b-v1"
+$marker = Join-Path $engineRoot ".ready-qwen-1.7b-v3"
+$oldMarkerV2 = Join-Path $engineRoot ".ready-qwen-1.7b-v2"
+$oldMarkerV1 = Join-Path $engineRoot ".ready-qwen-1.7b-v1"
 
 New-Item -ItemType Directory -Force -Path $engineRoot | Out-Null
 Remove-Item -Force -ErrorAction SilentlyContinue $marker
-Remove-Item -Force -ErrorAction SilentlyContinue $oldMarker
+Remove-Item -Force -ErrorAction SilentlyContinue $oldMarkerV2
+Remove-Item -Force -ErrorAction SilentlyContinue $oldMarkerV1
 
 $uv = Initialize-GCloneUv -GCloneRoot $gcloneRoot
 
@@ -51,5 +53,5 @@ Write-Output "GCLONE:Downloading Qwen3-TTS 1.7B model files..."
 & $python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-TTS-12Hz-1.7B-Base')"
 if ($LASTEXITCODE -ne 0) { throw "Qwen model download failed." }
 
-Set-Content -Path $marker -Value "qwen-1.7b-v2" -Encoding ASCII
+Set-Content -Path $marker -Value "qwen-1.7b-v3" -Encoding ASCII
 Write-Output "GCLONE:Qwen3-TTS is ready."
