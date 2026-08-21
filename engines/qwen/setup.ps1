@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 Set-Location $PSScriptRoot
 
 . (Join-Path $PSScriptRoot "..\common\bootstrap-uv.ps1")
@@ -30,16 +31,20 @@ Write-Output "GCLONE:Installing CUDA-enabled PyTorch for Qwen..."
 if ($LASTEXITCODE -ne 0) { throw "uv could not install the CUDA 12.8 PyTorch runtime for Qwen." }
 
 Write-Output "GCLONE:Installing Qwen3-TTS engine packages..."
-& $uv --color never pip install --python $python --upgrade "qwen-tts==0.1.1"
-if ($LASTEXITCODE -ne 0) { throw "uv could not install qwen-tts." }
+& $uv --color never pip install --python $python --upgrade "qwen-tts==0.1.1" "pytz>=2025.1"
+if ($LASTEXITCODE -ne 0) { throw "uv could not install qwen-tts and its Windows compatibility dependencies." }
 
-Write-Output "GCLONE:Verifying Qwen CUDA runtime..."
-& $python -c "import torch, torchaudio, qwen_tts; assert torch.version.cuda is not None, 'PyTorch is CPU-only'; assert torch.cuda.is_available(), 'CUDA is unavailable to PyTorch'; print('CUDA OK:', torch.__version__, 'CUDA', torch.version.cuda, torch.cuda.get_device_name(0))"
+# qwen-tts 0.1.1 omits pytz from its declared dependencies even though a Windows install can
+# need it through the imported runtime stack. Keep the explicit install above until upstream
+# publishes corrected package metadata.
+Write-Output "GCLONE:Verifying Qwen CUDA runtime and imports..."
+& $python -c "import pytz, torch, torchaudio; from qwen_tts import Qwen3TTSModel; assert torch.version.cuda is not None, 'PyTorch is CPU-only'; assert torch.cuda.is_available(), 'CUDA is unavailable to PyTorch'; print('Qwen import OK; CUDA:', torch.__version__, 'CUDA', torch.version.cuda, torch.cuda.get_device_name(0))"
 if ($LASTEXITCODE -ne 0) {
-    throw "Qwen's CUDA runtime did not pass verification. Make sure the NVIDIA driver is current and the GPU is available."
+    throw "Qwen's Python/CUDA runtime did not pass verification. See the installer log for the underlying import or CUDA error."
 }
 
 $env:HF_HOME = Join-Path $engineRoot "hf"
+$env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
 New-Item -ItemType Directory -Force -Path $env:HF_HOME | Out-Null
 
 Write-Output "GCLONE:Downloading Qwen3-TTS 1.7B model files..."
