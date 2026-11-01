@@ -100,6 +100,6 @@ Workers communicate with newline-delimited JSON over redirected stdin/stdout. Sw
 
 ## License
 
-`gclone` is licensed under the PolyForm Noncommercial License 1.0.0.
+`gclone`'s original code is licensed under the Apache License 2.0; see [LICENSE](LICENSE).
 
 `gclone` installs Qwen3-TTS 12Hz 1.7B Base and IndexTTS-2.5. Those models and their associated third-party software are governed by their own licenses.
